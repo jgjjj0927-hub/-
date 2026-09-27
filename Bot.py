@@ -5,10 +5,11 @@ import sys
 import time
 from threading import Thread
 from flask import Flask
+from typing import Callable, Dict, Any, Awaitable
 
 import aiosqlite
 import aiohttp
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
@@ -102,6 +103,35 @@ async def is_banned(user_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT 1 FROM banned WHERE user_id = ?", (user_id,)) as cur:
             return await cur.fetchone() is not None
+
+# ===== MIDDLEWARE (БАН) =====
+class BanMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[types.TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: types.TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        user = data.get("event_from_user")
+        if user is None:
+            return await handler(event, data)
+
+        # Пропускаем /unban и /admin
+        if isinstance(event, types.Message):
+            text = event.text or ""
+            if text.startswith("/unban") or text.startswith("/admin"):
+                return await handler(event, data)
+
+        # Проверяем бан
+        if await is_banned(user.id):
+            if isinstance(event, types.Message):
+                await event.answer("🚫 Ты забанен. Доступ запрещён.")
+            return
+
+        return await handler(event, data)
+
+dp.message.middleware(BanMiddleware())
+dp.callback_query.middleware(BanMiddleware())
 
 # ===== API =====
 GEO_API = "https://geocoding-api.open-meteo.com/v1/search"
@@ -201,9 +231,6 @@ async def send_weather(message: types.Message, city: str):
 # ===== ХЕНДЛЕРЫ =====
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
-    if await is_banned(message.from_user.id):
-        await message.answer("🚫 Ты забанен.")
-        return
     await register_user(message.from_user)
     await message.answer(
         f"👋 Привет, {message.from_user.first_name}!\n"
